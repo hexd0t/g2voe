@@ -51,6 +51,7 @@ class ScriptConstants:
     f_aioutput: int
     f_aioutputsvm: int
     f_aioutputsvmo: int
+    f_addchoice: int
     f_say: int
     f_say_overlay: int
     f_say_gold: int
@@ -74,6 +75,7 @@ class ScriptConstants:
         self.f_aioutput = cast(DaedalusSymbol, script.get_symbol_by_name("AI_OUTPUT")).index
         self.f_aioutputsvm = cast(DaedalusSymbol, script.get_symbol_by_name("AI_OUTPUTSVM")).index
         self.f_aioutputsvmo = cast(DaedalusSymbol, script.get_symbol_by_name("AI_OUTPUTSVM_OVERLAY")).index
+        self.f_addchoice = cast(DaedalusSymbol, script.get_symbol_by_name("INFO_ADDCHOICE")).index
 
         f_say = script.get_symbol_by_name("B_SAY")
         self.f_say = f_say.address if f_say is not None else -1
@@ -198,14 +200,22 @@ def extract_speaker(prev_insts: list[DaedalusInstruction], script_const: ScriptC
     return Speaker.NONE
 
 script_lines_cache : dict[int, list[ScriptLineInfo]] = {}
-def extract_script_lines(script: DaedalusScript, fun_addr: int, script_const: ScriptConstants) -> list[ScriptLineInfo]:
+def extract_script_lines(script: DaedalusScript, fun_addr: int, script_const: ScriptConstants, call_stack: list[int]|None = None) -> list[ScriptLineInfo]:
+    if call_stack is None:
+        call_stack = [fun_addr]
+    else:
+        if fun_addr in call_stack:
+            #print("breaking loop")
+            return []
+        call_stack = call_stack.copy()
+        call_stack.append(fun_addr)
     cached = script_lines_cache.get(fun_addr)
     if cached is not None:
         return cached
     current_addr = fun_addr
     prev_insts : list[DaedalusInstruction] = []
     inst = script.get_instruction(current_addr)
-    result = []
+    result : list[ScriptLineInfo] = []
     while True:
         if inst.op == DaedalusOpcode.RSR:
             break
@@ -218,6 +228,15 @@ def extract_script_lines(script: DaedalusScript, fun_addr: int, script_const: Sc
                 line_type = LineType.SVM
             elif inst.symbol == script_const.f_aioutputsvmo:
                 line_type = LineType.SVM_OVERLAY
+            elif inst.symbol == script_const.f_addchoice:
+                if len(prev_insts) < 1 or \
+                    prev_insts[-1].op != DaedalusOpcode.PUSHI:
+                    print(f"! Unparseable gold amount op @ {current_addr}")
+                else:
+                    choice_func_idx = prev_insts[-1].immediate
+                    choice_func = script.symbols[choice_func_idx]
+                    #print(f"Found choice: {choice_func.name}")
+                    result.extend(extract_script_lines(script, choice_func.address, script_const, call_stack))
 
         if inst.op == DaedalusOpcode.BL:
             if inst.address == script_const.f_say:
@@ -242,7 +261,7 @@ def extract_script_lines(script: DaedalusScript, fun_addr: int, script_const: Sc
                 #     print(f"> (unnamed)")
 
                 # we do not handle tracking parameters, so we might miss some lines:
-                result.extend(extract_script_lines(script, inst.address, script_const))
+                result.extend(extract_script_lines(script, inst.address, script_const, call_stack))
 
         if line_type != LineType.NONE:
             speaker = extract_speaker(prev_insts,  script_const, current_addr)
@@ -398,7 +417,7 @@ def main() -> int:
         svm_usages : dict[tuple[int, str], list[NpcInfo|None]] = {}
         line_owner : dict[str, NpcInfo|None] = {}
         # iterate all DIAs:
-        for symbol in []:#script.symbols:
+        for symbol in script.symbols:
             if symbol.type != DaedalusDataType.INSTANCE:
                 continue
             if symbol.parent != script_const.c_info.idx:
@@ -406,6 +425,8 @@ def main() -> int:
             parse_dia(script, csl, symbol, script_const, svm_usages, line_owner, output)
 
         del line_owner # no longer needed
+
+        # the following needs https://github.com/GothicKit/ZenKit4Py/pull/6 to not crash:
         svm_count = cast(DaedalusSymbol, script.get_symbol_by_name("SVM_MODULES")).get_int()
         print(f"SVM count: {svm_count}")
 
